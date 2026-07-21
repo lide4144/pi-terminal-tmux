@@ -29,7 +29,7 @@ pi
 ## Install
 
 ```bash
-pi install git:github.com/YOUR_USERNAME/pi-terminal-tmux
+pi install git:github.com/lide4144/pi-terminal-tmux
 ```
 
 Or auto-discover by placing the file in:

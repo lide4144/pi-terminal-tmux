@@ -7,7 +7,7 @@
   "author": "",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/lide4144/pi-terminal-tmux"
   },
   "pi": {
     "extensions": ["./extensions"],
