@@ -1,0 +1,21 @@
+{
+  "name": "pi-terminal-tmux",
+  "version": "0.1.0",
+  "description": "Pi extension for interactive TTY programs via tmux — spawn, send keystrokes, capture screenshots, stop",
+  "keywords": ["pi-package", "pi", "tmux", "terminal", "tty", "interactive", "pty"],
+  "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "image": "",
+    "video": ""
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
