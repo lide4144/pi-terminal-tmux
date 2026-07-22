@@ -269,6 +269,21 @@ bind '"' if -F '#{e|<:#{window_width},#{window_height}}' 'split-window' 'split-w
 bind % if -F '#{e|<:#{window_width},#{window_height}}' 'split-window -h' 'split-window'
 `;
 
+function getWindowDimensions(): { width: number; height: number } {
+	try {
+		const r = tmux(["display-message", "-p", "#{window_width},#{window_height}"]);
+		const [w, h] = r.stdout.split(",").map(Number);
+		return { width: w || 80, height: h || 24 };
+	} catch {
+		return { width: 80, height: 24 };
+	}
+}
+
+function useHorizontalSplit(): boolean {
+	const { width, height } = getWindowDimensions();
+	return width > height;
+}
+
 function setupSmartSplits(): void {
 	try {
 		tmux(["bind", '"', "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "split-window", "-h"]);
@@ -346,14 +361,18 @@ export default function terminalTmuxExtension(pi: ExtensionAPI): void {
 
 			// Build command — run via $SHELL -c for proper PATH/aliases
 			const shell = process.env.SHELL || "/bin/sh";
-			const result = tmux([
+			const splitArgs: string[] = [
 				"split-window",
-				"-d", // don't switch focus
-				"-P", // print pane ID
+				"-d",
+				"-P",
 				"-F", "#{pane_id}\t#{pane_pid}",
-				"-l", String(params.height ?? 24),
-				shell, "-c", params.command,
-			]);
+			];
+			// 智能分屏：横屏左右分(-h)，竖屏上下分(默认)
+			if (useHorizontalSplit()) {
+				splitArgs.push("-h");
+			}
+			splitArgs.push("-l", String(params.height ?? 24), shell, "-c", params.command);
+			const result = tmux(splitArgs);
 
 			const parts = result.stdout.split("\n");
 			const paneLine = parts[0]?.trim() ?? "";
