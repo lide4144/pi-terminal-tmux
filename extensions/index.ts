@@ -28,6 +28,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawnSync } from "node:child_process";
+import { appendFileSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -258,6 +260,35 @@ const terminalStopParams = Type.Object({
 		description: "Pane ID to terminate",
 	}),
 });
+
+// ── Smart split helpers ───────────────────────────────────────────────────────────────
+
+const SMART_SPLIT_CONF = `
+# pi-terminal-tmux: smart splits — landscape = horizontal, portrait = vertical
+bind '"' if -F '#{e|<:#{window_width},#{window_height}}' 'split-window' 'split-window -h'
+bind % if -F '#{e|<:#{window_width},#{window_height}}' 'split-window -h' 'split-window'
+`;
+
+function setupSmartSplits(): void {
+	try {
+		tmux(["bind", '"', "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "split-window", "-h"]);
+		tmux(["bind", "%", "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "-h", "split-window"]);
+	} catch {
+		// best-effort, tmux may lack if -F support
+	}
+}
+
+function ensureTmuxConfSmartSplits(): boolean {
+	const confPath = join(process.env.HOME || "/root", ".tmux.conf");
+	try {
+		const existing = readFileSync(confPath, "utf-8");
+		if (existing.includes("pi-terminal-tmux: smart splits")) return false;
+		appendFileSync(confPath, SMART_SPLIT_CONF);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Extension entry point
@@ -708,12 +739,31 @@ export default function terminalTmuxExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	// ── Notify on load ──────────────────────────────────────────────────
+	// ── Command: /terminal-tmux-setup ───────────────────────────────────
+	pi.registerCommand("terminal-tmux-setup", {
+		description: "Configure tmux with smart splits (landscape=horizontal, portrait=vertical split)",
+		handler: async (_args, ctx) => {
+			if (!tmuxOk) {
+				ctx.ui.notify("Not in tmux — nothing to configure.", "warning");
+				return;
+			}
+			setupSmartSplits();
+			const wrote = ensureTmuxConfSmartSplits();
+			if (wrote) {
+				ctx.ui.notify("Smart splits written to ~/.tmux.conf and applied to current session.", "success");
+			} else {
+				ctx.ui.notify("Smart splits applied to current session (already in ~/.tmux.conf or couldn't write).", "info");
+			}
+		},
+	});
+
+	// ── Notify on load, auto-configure smart splits ────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			assertInTmux();
+			setupSmartSplits();
 			ctx.ui.setStatus("tmux-term", ctx.ui.theme.fg("accent", "🐚 TTY"));
-			ctx.ui.notify("Terminal Tmux extension loaded. Use terminal_* tools for interactive TTY programs.", "info");
+			ctx.ui.notify("Terminal Tmux loaded. Smart splits active. Run /terminal-tmux-setup to persist.", "info");
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			ctx.ui.setStatus("tmux-term", ctx.ui.theme.fg("error", "⚠ no tmux"));
