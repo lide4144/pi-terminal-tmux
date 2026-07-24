@@ -124,7 +124,7 @@ function resolveTmuxBin(): string {
 	return _tmuxBin;
 }
 
-// Resolve default shell for tmux (Windows: try Git Bash → pwsh → cmd)
+// Resolve default shell for tmux (Windows: try pwsh → Git Bash → cmd)
 // Must return a FULL PATH with FORWARD SLASHES — tmux config eats backslashes
 let _defaultShell: string;
 
@@ -153,14 +153,7 @@ function resolveDefaultShell(): string {
 		}
 	}
 
-	// 1. Try Git Bash (most reliable on Windows for tmux)
-	const gitBash = "C:/Program Files/Git/bin/bash.exe";
-	if (existsSync(gitBash)) {
-		_defaultShell = gitBash;
-		return _defaultShell;
-	}
-
-	// 2. Try pwsh via `where pwsh` — pick the first path that actually executes
+	// 1. Try pwsh via `where pwsh` — pick the first path that actually executes
 	try {
 		const r = spawnSync("where", ["pwsh"], {
 			shell: "cmd.exe",
@@ -180,6 +173,13 @@ function resolveDefaultShell(): string {
 		}
 	} catch {
 		/* pwsh not found */
+	}
+
+	// 2. Try Git Bash (MSYS2 env may not init fully under tmux)
+	const gitBash = "C:/Program Files/Git/bin/bash.exe";
+	if (existsSync(gitBash)) {
+		_defaultShell = gitBash;
+		return _defaultShell;
 	}
 
 	// 3. Fallback: COMSPEC (cmd.exe) — forward-slash it too
