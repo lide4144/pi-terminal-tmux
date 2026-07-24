@@ -404,8 +404,7 @@ const terminalStopParams = Type.Object({
 const TMUX_SETUP_CONF = `
 # pi-terminal-tmux: basic settings
 set -g mouse on
-set -g default-terminal "xterm-256color"
-set -g extended-keys on
+set -g default-terminal "screen-256color"
 set -g default-shell "${resolveDefaultShell()}"
 
 # smart splits — landscape = horizontal, portrait = vertical
@@ -431,10 +430,11 @@ function useHorizontalSplit(): boolean {
 function applyTmuxSettings(): void {
 	try {
 		tmux(["set", "-g", "mouse", "on"]);
-		tmux(["set", "-g", "default-terminal", "xterm-256color"]);
-		tmux(["set", "-g", "extended-keys", "on"]);
+		tmux(["set", "-g", "default-terminal", "screen-256color"]);
 		const shell = resolveDefaultShell();
 		tmux(["set", "-g", "default-shell", shell]);
+		// Force minimum window width for proper TUI rendering
+		try { tmux(["resize-window", "-x", "80"]); } catch { /* window may be smaller than terminal */ }
 		tmux(["bind", '"', "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "split-window", "-h"]);
 		tmux(["bind", "%", "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "-h", "split-window"]);
 	} catch {
