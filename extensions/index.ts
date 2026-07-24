@@ -28,7 +28,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -53,11 +53,147 @@ interface TmuxResult {
 const panes = new Map<string, PaneMeta>();
 
 // ---------------------------------------------------------------------------
+// Windows helpers
+// ---------------------------------------------------------------------------
+// ponytail: platform branching covers PATH resolution + env vars + shell probing.
+// Add WSL detection if WSL interop becomes a concern.
+
+const IS_WIN = process.platform === "win32";
+
+function getHomeDir(): string {
+	return process.env.HOME || process.env.USERPROFILE || (IS_WIN ? "C:\\" : "/root");
+}
+
+function getShell(): string {
+	return process.env.SHELL || process.env.COMSPEC || (IS_WIN ? "cmd.exe" : "/bin/sh");
+}
+
+// Lazy-resolve tmux binary path (supports Windows where tmux may not be in PATH)
+let _tmuxBin: string;
+
+function resolveTmuxBin(): string {
+	if (_tmuxBin) return _tmuxBin;
+
+	// Default name by platform
+	_tmuxBin = IS_WIN ? "tmux.exe" : "tmux";
+
+	// Check if it works via PATH
+	try {
+		const r = spawnSync(_tmuxBin, ["-V"], {
+			encoding: "utf-8",
+			timeout: 3000,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		if (r.status === 0) return _tmuxBin;
+	} catch {
+		/* not in PATH */
+	}
+
+	// Windows: search common install locations
+	if (IS_WIN) {
+		const localDir =
+			process.env.LOCALAPPDATA || join(process.env.USERPROFILE || "C:\\", "AppData", "Local");
+		const candidates = [
+			join(localDir, "Microsoft", "WinGet", "Packages"),
+			join(process.env.USERPROFILE || "C:\\", "scoop", "shims"),
+			"C:\\ProgramData\\chocolatey\\bin",
+		];
+		for (const dir of candidates) {
+			try {
+				for (const entry of readdirSync(dir, { withFileTypes: true })) {
+					if (entry.isDirectory()) {
+						const candidate = join(dir, entry.name, "tmux.exe");
+						if (existsSync(candidate)) {
+							_tmuxBin = candidate;
+							return _tmuxBin;
+						}
+					}
+				}
+				// Also check the directory directly (some installs put tmux.exe right there)
+				const direct = join(dir, "tmux.exe");
+				if (existsSync(direct)) {
+					_tmuxBin = direct;
+					return _tmuxBin;
+				}
+			} catch {
+				/* skip unreadable dirs */
+			}
+		}
+	}
+
+	return _tmuxBin;
+}
+
+// Resolve default shell for tmux (Windows: try pwsh → Git Bash → cmd)
+// Must return a FULL PATH with FORWARD SLASHES — tmux config eats backslashes
+let _defaultShell: string;
+
+function resolveDefaultShell(): string {
+	if (_defaultShell) return _defaultShell;
+
+	if (!IS_WIN) {
+		_defaultShell = getShell();
+		return _defaultShell;
+	}
+
+	// Normalize to forward slashes (tmux config treats \ as escape)
+	const normalize = (p: string) => p.replace(/\\/g, "/");
+
+	// Helper: test if a path is executable (handles WindowsApps app-exec links)
+	function canExec(p: string): boolean {
+		try {
+			const r = spawnSync(p, ["-NoProfile", "-Command", "echo 1"], {
+				encoding: "utf-8",
+				timeout: 3000,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			return r.status === 0;
+		} catch {
+			return false;
+		}
+	}
+
+	// 1. Try pwsh via `where pwsh` — pick the first path that actually executes
+	try {
+		const r = spawnSync("where", ["pwsh"], {
+			shell: "cmd.exe",
+			encoding: "utf-8",
+			timeout: 5000,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		if (r.status === 0) {
+			const candidates = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+			for (const c of candidates) {
+				const normalized = normalize(c);
+				if (canExec(normalized)) {
+					_defaultShell = normalized;
+					return _defaultShell;
+				}
+			}
+		}
+	} catch {
+		/* pwsh not found */
+	}
+
+	// 2. Try Git Bash (common on Windows via Git for Windows)
+	const gitBash = "C:/Program Files/Git/bin/bash.exe";
+	if (existsSync(gitBash)) {
+		_defaultShell = gitBash;
+		return _defaultShell;
+	}
+
+	// 3. Fallback: COMSPEC (cmd.exe) — forward-slash it too
+	_defaultShell = normalize(getShell());
+	return _defaultShell;
+}
+
+// ---------------------------------------------------------------------------
 // tmux helper — safe argument passing
 // ---------------------------------------------------------------------------
 
 function tmux(args: string[]): TmuxResult {
-	const result = spawnSync("tmux", args, {
+	const bin = resolveTmuxBin();
+	const result = spawnSync(bin, args, {
 		encoding: "utf-8",
 		timeout: 10_000,
 		maxBuffer: 10 * 1024 * 1024,
@@ -94,9 +230,11 @@ function assertInTmux(): void {
 	try {
 		tmux(["-V"]);
 	} catch (e: unknown) {
-		throw new Error(
-			`tmux not found or not working. Is tmux installed?\n` + `Detail: ${e instanceof Error ? e.message : String(e)}`,
-		);
+		const detail = e instanceof Error ? e.message : String(e);
+		const platHint = IS_WIN
+			? "Windows: install via 'winget install tmux-windows' or 'scoop install tmux'"
+			: "macOS: 'brew install tmux'  |  Linux: 'apt install tmux' or 'yum install tmux'";
+		throw new Error(`tmux not found or not working. Is tmux installed?\n${platHint}\nDetail: ${detail}`);
 	}
 }
 
@@ -263,8 +401,12 @@ const terminalStopParams = Type.Object({
 
 // ── Smart split helpers ───────────────────────────────────────────────────────────────
 
-const SMART_SPLIT_CONF = `
-# pi-terminal-tmux: smart splits — landscape = horizontal, portrait = vertical
+const TMUX_SETUP_CONF = `
+# pi-terminal-tmux: basic settings
+set -g mouse on
+set -g default-shell "${resolveDefaultShell()}"
+
+# smart splits — landscape = horizontal, portrait = vertical
 bind '"' if -F '#{e|<:#{window_width},#{window_height}}' 'split-window' 'split-window -h'
 bind % if -F '#{e|<:#{window_width},#{window_height}}' 'split-window -h' 'split-window'
 `;
@@ -284,25 +426,36 @@ function useHorizontalSplit(): boolean {
 	return width > height;
 }
 
-function setupSmartSplits(): void {
+function applyTmuxSettings(): void {
 	try {
+		tmux(["set", "-g", "mouse", "on"]);
+		const shell = resolveDefaultShell();
+		tmux(["set", "-g", "default-shell", shell]);
 		tmux(["bind", '"', "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "split-window", "-h"]);
 		tmux(["bind", "%", "if", "-F", '#{e|<:#{window_width},#{window_height}}', "split-window", "-h", "split-window"]);
 	} catch {
-		// best-effort, tmux may lack if -F support
+		// best-effort
 	}
 }
 
-function ensureTmuxConfSmartSplits(): boolean {
-	const confPath = join(process.env.HOME || "/root", ".tmux.conf");
+function ensureTmuxConf(): boolean {
+	const confPath = join(getHomeDir(), ".tmux.conf");
 	try {
 		const existing = readFileSync(confPath, "utf-8");
-		if (existing.includes("pi-terminal-tmux: smart splits")) return false;
-		appendFileSync(confPath, SMART_SPLIT_CONF);
+		if (existing.includes("pi-terminal-tmux: basic settings")) return false;
+		appendFileSync(confPath, TMUX_SETUP_CONF);
 		return true;
 	} catch {
 		return false;
 	}
+}
+
+// ── Write tmux config at module load (before tmux starts) ────────────
+// ponytail: write on every load; the guard inside ensureTmuxConf() skips if already present.
+try {
+	ensureTmuxConf();
+} catch {
+	// best-effort at module load
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +513,7 @@ export default function terminalTmuxExtension(pi: ExtensionAPI): void {
 			const label = params.name ?? params.command.slice(0, 40);
 
 			// Build command — run via $SHELL -c for proper PATH/aliases
-			const shell = process.env.SHELL || "/bin/sh";
+			const shell = getShell();
 			const splitArgs: string[] = [
 				"split-window",
 				"-d",
@@ -760,29 +913,29 @@ export default function terminalTmuxExtension(pi: ExtensionAPI): void {
 
 	// ── Command: /terminal-tmux-setup ───────────────────────────────────
 	pi.registerCommand("terminal-tmux-setup", {
-		description: "Configure tmux with smart splits (landscape=horizontal, portrait=vertical split)",
+		description: "Configure tmux with mouse support, default shell (pwsh), and smart splits",
 		handler: async (_args, ctx) => {
 			if (!tmuxOk) {
 				ctx.ui.notify("Not in tmux — nothing to configure.", "warning");
 				return;
 			}
-			setupSmartSplits();
-			const wrote = ensureTmuxConfSmartSplits();
+			applyTmuxSettings();
+			const wrote = ensureTmuxConf();
 			if (wrote) {
-				ctx.ui.notify("Smart splits written to ~/.tmux.conf and applied to current session.", "success");
+				ctx.ui.notify("Tmux config written to ~/.tmux.conf and applied (mouse, pwsh, smart splits).", "success");
 			} else {
-				ctx.ui.notify("Smart splits applied to current session (already in ~/.tmux.conf or couldn't write).", "info");
+				ctx.ui.notify("Tmux config applied to current session (already in ~/.tmux.conf or couldn't write).", "info");
 			}
 		},
 	});
 
-	// ── Notify on load, auto-configure smart splits ────────────────────
+	// ── Notify on load, auto-configure tmux ────────────────────────────
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			assertInTmux();
-			setupSmartSplits();
+			applyTmuxSettings();
 			ctx.ui.setStatus("tmux-term", ctx.ui.theme.fg("accent", "🐚 TTY"));
-			ctx.ui.notify("Terminal Tmux loaded. Smart splits active. Run /terminal-tmux-setup to persist.", "info");
+			ctx.ui.notify("Terminal Tmux loaded. Mouse + pwsh + smart splits active. Run /terminal-tmux-setup to persist.", "info");
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
 			ctx.ui.setStatus("tmux-term", ctx.ui.theme.fg("error", "⚠ no tmux"));
